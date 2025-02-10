@@ -1,0 +1,126 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <VL53L0X.h>
+
+// Motor pins
+#define IN1 13
+#define IN2 12
+#define IN3 14
+#define IN4 27
+#define ENA 26
+#define ENB 25
+
+// IR sensor pins
+#define IR_LEFT 34
+#define IR_RIGHT 35
+
+// Encoder pins
+#define ENCA_A 4
+#define ENCA_B 18
+#define ENCB_A 19
+#define ENCB_B 23
+
+// LiDAR
+VL53L0X lidar;
+
+// Encoder variables
+volatile long pulseCountA = 0;
+volatile long pulseCountB = 0;
+
+// Motor speed
+const int motorSpeed = 80;
+const int stopDistance = 90; // 9 cm in mm
+
+// Function prototypes for encoder interrupts
+void IRAM_ATTR encoderAInterrupt();
+void IRAM_ATTR encoderBInterrupt();
+void IRAM_ATTR encoderCInterrupt();
+void IRAM_ATTR encoderDInterrupt();
+void moveForward();
+void stopMotors();
+
+void setup() {
+    // Motor pins setup
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    pinMode(IN3, OUTPUT);
+    pinMode(IN4, OUTPUT);
+    pinMode(ENA, OUTPUT);
+    pinMode(ENB, OUTPUT);
+
+    // IR sensors setup
+    pinMode(IR_LEFT, INPUT);
+    pinMode(IR_RIGHT, INPUT);
+
+    // Encoder setup
+    pinMode(ENCA_A, INPUT);
+    pinMode(ENCA_B, INPUT);
+    pinMode(ENCB_A, INPUT);
+    pinMode(ENCB_B, INPUT);
+
+    // Attach interrupts for encoders
+    attachInterrupt(digitalPinToInterrupt(ENCA_A), encoderAInterrupt, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENCA_B), encoderBInterrupt, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENCB_A), encoderCInterrupt, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENCB_B), encoderDInterrupt, CHANGE);
+
+    // LiDAR setup
+    Wire.begin();
+    lidar.init();
+    lidar.setTimeout(500);
+
+    // Serial setup
+    Serial.begin(115200);
+    Serial.println("Robot initialized...");
+}
+
+void loop() {
+    int distance = lidar.readRangeSingleMillimeters();
+    Serial.print("Distance: ");
+    Serial.println(distance);
+
+    if (distance > stopDistance) {
+        moveForward();
+    } else {
+        stopMotors();
+    }
+
+    delay(100);
+}
+
+void moveForward() {
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENA, motorSpeed);
+    analogWrite(ENB, motorSpeed);
+    Serial.println("Moving forward...");
+}
+
+void stopMotors() {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENA, 0);
+    analogWrite(ENB, 0);
+    Serial.println("Stopping...");
+}
+
+// Encoder interrupt functions
+void IRAM_ATTR encoderAInterrupt() {
+    pulseCountA++;
+}
+
+void IRAM_ATTR encoderBInterrupt() {
+    pulseCountA--;
+}
+
+void IRAM_ATTR encoderCInterrupt() {
+    pulseCountB++;
+}
+
+void IRAM_ATTR encoderDInterrupt() {
+    pulseCountB--;
+}
