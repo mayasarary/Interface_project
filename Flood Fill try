@@ -1,0 +1,153 @@
+#include <Wire.h>
+#include <VL53L0X.h>
+#include <queue>
+#include <vector>
+
+// Motor pins
+#define IN1 13
+#define IN2 12
+#define IN3 14
+#define IN4 27
+#define ENA 26
+#define ENB 25
+
+// IR sensor pins
+#define IR_LEFT 34
+#define IR_RIGHT 35
+
+// Encoder pins
+#define ENCA_A 4
+#define ENCA_B 18
+#define ENCB_A 19
+#define ENCB_B 23
+
+// LiDAR
+VL53L0X lidar;
+
+// Maze dimensions
+const int MAZE_SIZE = 8;
+int dp[MAZE_SIZE][MAZE_SIZE];
+
+// Robot position
+int robotX = 0, robotY = 0;
+
+// Movement directions (up, right, down, left)
+const int dx[4] = {-1, 0, 1, 0};
+const int dy[4] = {0, 1, 0, -1};
+
+void initializeDP() {
+    for (int i = 0; i < MAZE_SIZE; i++) {
+        for (int j = 0; j < MAZE_SIZE; j++) {
+            dp[i][j] = MAZE_SIZE * MAZE_SIZE; // Large initial value
+        }
+    }
+    dp[MAZE_SIZE / 2][MAZE_SIZE / 2] = 0; // Goal cell
+}
+
+void floodFill() {
+    std::queue<std::pair<int, int>> q;
+    q.push({robotX, robotY});
+    while (!q.empty()) {
+        auto [x, y] = q.front();
+        q.pop();
+        int minWeight = dp[x][y];
+        
+        for (int i = 0; i < 4; i++) {
+            int nx = x + dx[i], ny = y + dy[i];
+            if (nx >= 0 && nx < MAZE_SIZE && ny >= 0 && ny < MAZE_SIZE) {
+                minWeight = min(minWeight, dp[nx][ny]);
+            }
+        }
+        if (dp[x][y] != minWeight + 1) {
+            dp[x][y] = minWeight + 1;
+            for (int i = 0; i < 4; i++) {
+                int nx = x + dx[i], ny = y + dy[i];
+                if (nx >= 0 && nx < MAZE_SIZE && ny >= 0 && ny < MAZE_SIZE) {
+                    q.push({nx, ny});
+                }
+            }
+        }
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    Wire.begin();
+    lidar.init();
+    lidar.setTimeout(500);
+    
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    pinMode(IN3, OUTPUT);
+    pinMode(IN4, OUTPUT);
+    pinMode(ENA, OUTPUT);
+    pinMode(ENB, OUTPUT);
+    
+    pinMode(IR_LEFT, INPUT);
+    pinMode(IR_RIGHT, INPUT);
+    
+    initializeDP();
+}
+
+void loop() {
+    int distance = lidar.readRangeSingleMillimeters() / 10;
+    bool irLeft = digitalRead(IR_LEFT);
+    bool irRight = digitalRead(IR_RIGHT);
+    
+    Serial.print("LiDAR: ");
+    Serial.print(distance);
+    Serial.print(" | IR Left: ");
+    Serial.print(irLeft);
+    Serial.print(" | IR Right: ");
+    Serial.println(irRight);
+    
+    if (lidar.timeoutOccurred()) {
+        Serial.println("LiDAR Timeout");
+    }
+    
+    if (distance < 10 || irLeft == HIGH || irRight == HIGH) {
+        stopMotors();
+        floodFill();
+        navigate();
+    } else {
+        moveStraight();
+    }
+    delay(200); // Small delay to allow periodic checks
+}
+
+void moveStraight() {
+    digitalWrite(IN1, HIGH);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, HIGH);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENA, 200);
+    analogWrite(ENB, 200);
+}
+
+void stopMotors() {
+    digitalWrite(IN1, LOW);
+    digitalWrite(IN2, LOW);
+    digitalWrite(IN3, LOW);
+    digitalWrite(IN4, LOW);
+    analogWrite(ENA, 0);
+    analogWrite(ENB, 0);
+}
+
+void navigate() {
+    int bestX = robotX, bestY = robotY, minValue = dp[robotX][robotY];
+    for (int i = 0; i < 4; i++) {
+        int nx = robotX + dx[i], ny = robotY + dy[i];
+        if (nx >= 0 && nx < MAZE_SIZE && ny >= 0 && ny < MAZE_SIZE) {
+            if (dp[nx][ny] < minValue) {
+                minValue = dp[nx][ny];
+                bestX = nx;
+                bestY = ny;
+            }
+        }
+    }
+    robotX = bestX;
+    robotY = bestY;
+    moveStraight();
+    delay(500); // Allow the robot to move a bit before re-evaluating
+    stopMotors();
+}
