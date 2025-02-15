@@ -1,0 +1,256 @@
+#include <Wire.h>
+#include <VL53L0X.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+
+// ========== Pin Definitions ==========
+// Motor driver pins
+#define IN1  13
+#define IN2  12
+#define IN3  14
+#define IN4  27
+#define ENA  26   // Left Motor PWM
+#define ENB  25   // Right Motor PWM
+
+// IR sensor pins (digital)
+#define IR_LEFT   34
+#define IR_RIGHT  35
+
+// LiDAR object (front distance)
+VL53L0X lidar;
+
+// MPU6050 object
+Adafruit_MPU6050 mpu;
+
+// ========== Motor Speeds ==========
+int forwardSpeed      = 80;  // Adjust if too fast/slow
+int turnSpeed         = 80;  // Speed used during turning
+int frontWallThreshold= 90;  // 9 cm threshold
+
+// ========== Global Variables for Gyro Integration ==========
+float currentYaw   = 0.0;      
+unsigned long lastMicros = 0;  
+
+// -----------------------------------------------------------
+//                         SETUP
+// -----------------------------------------------------------
+void setup() {
+  // (Optional) For debug, can keep or remove Serial.begin
+  Serial.begin(115200);
+
+  // Seed the random generator for random turns
+  randomSeed(analogRead(0));
+
+  // 1. Motor pins
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  // 2. IR sensor pins (digital)
+  pinMode(IR_LEFT, INPUT);
+  pinMode(IR_RIGHT, INPUT);
+  // If sensors are active-low, use pinMode(..., INPUT_PULLUP) and invert logic.
+
+  // 3. LiDAR init
+  Wire.begin();
+  lidar.init();
+  lidar.setTimeout(500);
+  lidar.startContinuous();
+
+  // 4. MPU6050 init
+  initMPU6050();
+  lastMicros = micros(); 
+
+  // === Immediately start moving forward ===
+  moveForward();
+}
+
+// -----------------------------------------------------------
+//                         LOOP
+// -----------------------------------------------------------
+void loop() {
+  // Continuously update gyro-based yaw
+  updateGyro();
+
+  // Read sensor states
+  bool frontWall = isFrontWall(); 
+  bool leftWall  = isLeftWall();  
+  bool rightWall = isRightWall(); 
+
+  // ========== The 4-Point Maze Logic ==========
+
+  // (4) If front, left, and right all blocked => turn until one side is free
+  if (frontWall && leftWall && rightWall) {
+    while (true) {
+      if (!isFrontWall() || !isLeftWall() || !isRightWall()) {
+        break; // Freed up a direction
+      }
+      turnLeft90();  // Or turnRight90(), your choice
+    }
+  }
+  // (1) If front & left => turn right
+  else if (frontWall && leftWall) {
+    turnRight90();
+  }
+  // (2) If front & right => turn left
+  else if (frontWall && rightWall) {
+    turnLeft90();
+  }
+  // (3) If front only => randomly turn left or right
+  else if (frontWall && !leftWall && !rightWall) {
+    if (random(2) == 0) {
+      turnLeft90();
+    } else {
+      turnRight90();
+    }
+  }
+  // If front is blocked but doesn't match above combos, default to left
+  else if (frontWall) {
+    turnLeft90();
+  }
+  // Otherwise, path is open => move forward
+  else {
+    moveForward();
+  }
+}
+
+// -----------------------------------------------------------
+//                     MOTOR CONTROL
+// -----------------------------------------------------------
+void moveForward() {
+  digitalWrite(IN1, HIGH);  
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+
+  analogWrite(ENA, forwardSpeed);
+  analogWrite(ENB, forwardSpeed);
+}
+
+void stopMotors() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+}
+
+// -----------------------------------------------------------
+//                    90° TURNS (MPU6050)
+// -----------------------------------------------------------
+void turnLeft90() {
+  float startAngle  = currentYaw;
+  float targetAngle = startAngle + 90.0;
+  if (targetAngle >= 360.0) targetAngle -= 360.0;
+
+  // Left turn: left wheel backward, right wheel forward
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+
+  analogWrite(ENA, turnSpeed);
+  analogWrite(ENB, turnSpeed);
+
+  while (true) {
+    updateGyro();
+    float diff = targetAngle - currentYaw;
+
+    // Handle wrap-around
+    if (diff < -180.0) diff += 360.0;
+    else if (diff > 180.0) diff -= 360.0;
+
+    if (diff <= 0.0) break;
+    delay(5);
+  }
+  stopMotors();
+}
+
+void turnRight90() {
+  float startAngle  = currentYaw;
+  float targetAngle = startAngle - 90.0;
+  if (targetAngle < 0.0) targetAngle += 360.0;
+
+  // Right turn: left wheel forward, right wheel backward
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, HIGH);
+
+  analogWrite(ENA, turnSpeed);
+  analogWrite(ENB, turnSpeed);
+
+  while (true) {
+    updateGyro();
+    float diff = targetAngle - currentYaw;
+
+    if (diff < -180.0) diff += 360.0;
+    else if (diff > 180.0) diff -= 360.0;
+
+    if (diff >= 0.0) break;
+    delay(5);
+  }
+  stopMotors();
+}
+
+// -----------------------------------------------------------
+//               SENSORS & HELPER FUNCTIONS
+// -----------------------------------------------------------
+bool isLeftWall() {
+  // If IR is HIGH when blocked:
+  return (digitalRead(IR_LEFT) == HIGH);
+}
+
+bool isRightWall() {
+  // If IR is HIGH when blocked:
+  return (digitalRead(IR_RIGHT) == HIGH);
+}
+
+bool isFrontWall() {
+  int distance = getFrontDistance();
+  return (distance > 0 && distance < frontWallThreshold);
+}
+
+int getFrontDistance() {
+  int distance = lidar.readRangeContinuousMillimeters();
+  if (lidar.timeoutOccurred()) {
+    // For minimal output, comment out
+    Serial.println("VL53L0X Timeout!");
+  }
+  return distance;
+}
+
+// -----------------------------------------------------------
+//             MPU6050 INIT & GYRO INTEGRATION
+// -----------------------------------------------------------
+void initMPU6050() {
+  if (!mpu.begin()) {
+    Serial.println("Failed to find MPU6050 chip. Check wiring / power!");
+    while (1) { delay(10); }
+  }
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+}
+
+void updateGyro() {
+  unsigned long nowMicros = micros();
+  float dt = (nowMicros - lastMicros) / 1000000.0;
+  lastMicros = nowMicros;
+
+  sensors_event_t accel, gyro, temp;
+  mpu.getEvent(&accel, &gyro, &temp);
+
+  // Convert gyro.z (rad/s) => deg/s
+  float gz_deg_s = gyro.gyro.z * (180.0 / 3.14159265);
+  currentYaw += gz_deg_s * dt;
+
+  // Wrap yaw [0..360)
+  if (currentYaw >= 360.0) currentYaw -= 360.0;
+  else if (currentYaw < 0.0) currentYaw += 360.0;
+}
